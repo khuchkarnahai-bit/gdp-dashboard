@@ -1,0 +1,329 @@
+
+!pip -q install gradio plotly pandas numpy
+
+import gradio as gr
+import pandas as pd
+import numpy as np
+import plotly.express as px
+from datetime import datetime
+
+# --------------------------------
+# 1. CREATE SAMPLE FOOD DELIVERY DATA
+# --------------------------------
+
+np.random.seed(42)
+
+cities = ["Delhi", "Mumbai", "Bangalore", "Chandigarh", "Ludhiana"]
+cuisines = ["Indian", "Chinese", "Italian", "Mexican", "Fast Food"]
+restaurants = [
+    "Food Hub", "Spice Garden", "Pizza Point",
+    "Burger House", "Chinese Wok"
+]
+
+data = []
+
+for i in range(500):
+    hour = np.random.choice(
+        [9, 10, 11, 12, 13, 14, 17, 18, 19, 20, 21, 22]
+    )
+
+    delivery = np.random.randint(20, 75)
+
+    data.append({
+        "order_id": i + 1,
+        "city": np.random.choice(cities),
+        "cuisine": np.random.choice(cuisines),
+        "restaurant": np.random.choice(restaurants),
+        "order_time": f"2026-10-01 {hour:02d}:{np.random.randint(0,60):02d}:00",
+        "delivery_minutes": delivery
+    })
+
+sample_df = pd.DataFrame(data)
+
+
+# --------------------------------
+# 2. DASHBOARD FUNCTION
+# --------------------------------
+
+def dashboard(file, city_filter, cuisine_filter):
+
+    if file is not None:
+        df = pd.read_csv(file.name if hasattr(file, "name") else file)
+    else:
+        df = sample_df.copy()
+
+    required = [
+        "city", "cuisine", "restaurant",
+        "order_time", "delivery_minutes"
+    ]
+
+    missing = [col for col in required if col not in df.columns]
+
+    if missing:
+        return (
+            "Missing columns: " + ", ".join(missing),
+            None, None, None, None, pd.DataFrame()
+        )
+
+    df["delivery_minutes"] = pd.to_numeric(
+        df["delivery_minutes"], errors="coerce"
+    )
+
+    df["order_time"] = pd.to_datetime(
+        df["order_time"], errors="coerce"
+    )
+
+    df = df.dropna(subset=[
+        "city", "cuisine", "restaurant",
+        "order_time", "delivery_minutes"
+    ])
+
+    if df.empty:
+        return (
+            "No valid data found.", None, None, None, None,
+            pd.DataFrame()
+        )
+
+    if city_filter and city_filter != "All":
+        df = df[df["city"] == city_filter]
+
+    if cuisine_filter and cuisine_filter != "All":
+        df = df[df["cuisine"] == cuisine_filter]
+
+    if df.empty:
+        return (
+            "No orders match these filters.",
+            None, None, None, None, pd.DataFrame()
+        )
+
+    # Create time slots
+    def get_slot(hour):
+        if 6 <= hour < 12:
+            return "Morning"
+        elif 12 <= hour < 17:
+            return "Afternoon"
+        elif 17 <= hour < 22:
+            return "Evening"
+        else:
+            return "Night"
+
+    df["time_slot"] = df["order_time"].dt.hour.apply(get_slot)
+
+    # Delivery performance
+    df["status"] = np.where(
+        df["delivery_minutes"] > 45,
+        "Late", "On Time"
+    )
+
+    total_orders = len(df)
+    avg_delivery = df["delivery_minutes"].mean()
+    late_orders = (df["status"] == "Late").sum()
+    on_time = (df["status"] == "On Time").mean() * 100
+
+    # KPI summary
+    summary = f"""
+# FOOD DELIVERY ANALYTICS
+
+| Performance Metric | Result |
+|---|---:|
+| Total Orders | {total_orders:,} |
+| Average Delivery Time | {avg_delivery:.1f} minutes |
+| Late Deliveries | {late_orders:,} |
+| On-Time Delivery | {on_time:.1f}% |
+"""
+
+    # --------------------------------
+    # 3. CITY ANALYSIS
+    # --------------------------------
+
+    city_data = df.groupby("city").agg(
+        Orders=("city", "count"),
+        Average_Delivery=("delivery_minutes", "mean")
+    ).reset_index()
+
+    fig_city = px.bar(
+        city_data,
+        x="city",
+        y="Orders",
+        color="Average_Delivery",
+        title="Orders and Delivery Performance by City",
+        color_continuous_scale="Viridis"
+    )
+
+    # --------------------------------
+    # 4. CUISINE ANALYSIS
+    # --------------------------------
+
+    cuisine_data = df.groupby("cuisine").agg(
+        Orders=("cuisine", "count"),
+        Average_Delivery=("delivery_minutes", "mean")
+    ).reset_index()
+
+    fig_cuisine = px.bar(
+        cuisine_data,
+        x="cuisine",
+        y="Orders",
+        color="Average_Delivery",
+        title="Cuisine-wise Order Analysis"
+    )
+
+    # --------------------------------
+    # 5. PEAK HOUR ANALYSIS
+    # --------------------------------
+
+    slot_data = df.groupby("time_slot").size().reset_index(
+        name="Orders"
+    )
+
+    fig_time = px.bar(
+        slot_data,
+        x="time_slot",
+        y="Orders",
+        title="Peak Demand by Time Slot",
+        color="Orders"
+    )
+
+    # --------------------------------
+    # 6. RESTAURANT ANALYSIS
+    # --------------------------------
+
+    restaurant_data = df.groupby("restaurant").agg(
+        Orders=("restaurant", "count"),
+        Average_Delivery=("delivery_minutes", "mean")
+    ).reset_index()
+
+    fig_restaurant = px.bar(
+        restaurant_data,
+        x="restaurant",
+        y="Average_Delivery",
+        color="Orders",
+        title="Restaurant-wise Average Delivery Time"
+    )
+
+    # --------------------------------
+    # 7. STAFFING RECOMMENDATION
+    # --------------------------------
+
+    peak = slot_data.sort_values(
+        "Orders", ascending=False
+    ).iloc[0]
+
+    slow = restaurant_data.sort_values(
+        "Average_Delivery", ascending=False
+    ).iloc[0]
+
+    recommendations = f"""
+## STAFFING & OPERATIONS RECOMMENDATIONS
+
+**1. Peak Demand**
+
+{peak['time_slot']} is the busiest time slot with
+{int(peak['Orders'])} orders.
+
+Recommendation: Consider assigning additional delivery
+partners during this time.
+
+**2. Restaurant Performance**
+
+{slow['restaurant']} has the highest average delivery time:
+{slow['Average_Delivery']:.1f} minutes.
+
+Recommendation: Review restaurant preparation and pickup delays.
+
+**3. Delivery Performance**
+
+There are {late_orders} late orders out of {total_orders} orders.
+
+Recommendation: Investigate traffic, restaurant preparation
+and delivery partner availability.
+"""
+
+    return (
+        summary + "\n" + recommendations,
+        fig_city,
+        fig_cuisine,
+        fig_time,
+        fig_restaurant,
+        df
+    )
+
+
+# --------------------------------
+# 8. CREATE WEBSITE INTERFACE
+# --------------------------------
+
+with gr.Blocks(theme=gr.themes.Soft()) as app:
+
+    gr.Markdown("""
+    # FOOD DELIVERY OPERATIONS ANALYTICS SYSTEM
+
+    ### Analyze orders | Monitor delivery | Improve staffing
+    """)
+
+    gr.Markdown("### Upload your dataset (optional)")
+
+    file = gr.File(
+        label="Upload Food Delivery CSV",
+        file_types=[".csv"],
+        type="filepath"
+    )
+
+    with gr.Row():
+        city = gr.Textbox(
+            label="City Filter",
+            placeholder="All or enter a city name"
+        )
+
+        cuisine = gr.Textbox(
+            label="Cuisine Filter",
+            placeholder="All or enter a cuisine"
+        )
+
+    gr.Markdown(
+        "Leave both filters empty to see all cities and cuisines."
+    )
+
+    btn = gr.Button("Generate Analytics Dashboard", variant="primary")
+
+    output = gr.Markdown()
+
+    with gr.Row():
+        city_chart = gr.Plot(label="City Analysis")
+        cuisine_chart = gr.Plot(label="Cuisine Analysis")
+
+    with gr.Row():
+        time_chart = gr.Plot(label="Peak Hours")
+        restaurant_chart = gr.Plot(label="Restaurant Analysis")
+
+    table = gr.Dataframe(
+        label="Order Data",
+        interactive=False
+    )
+
+    btn.click(
+        fn=dashboard,
+        inputs=[file, city, cuisine],
+        outputs=[
+            output,
+            city_chart,
+            cuisine_chart,
+            time_chart,
+            restaurant_chart,
+            table
+        ]
+    )
+
+    app.load(
+        fn=lambda: dashboard(None, "All", "All"),
+        inputs=[],
+        outputs=[
+            output,
+            city_chart,
+            cuisine_chart,
+            time_chart,
+            restaurant_chart,
+            table
+        ]
+    )
+
+app.launch(share=True)
